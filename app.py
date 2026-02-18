@@ -151,7 +151,7 @@ if df.empty:
     st.warning("Waiting for data collection...")
     st.stop()
 
-df["late"]      = pd.to_numeric(df["late"],  errors="coerce").fillna(0)
+df["late"]      = pd.to_numeric(df["late"],  errors="coerce").fillna(0).clip(lower=0)
 df["duein"]     = pd.to_numeric(df["duein"], errors="coerce").fillna(0)
 df["timestamp"] = pd.to_datetime(df["timestamp"])
 
@@ -174,6 +174,13 @@ def sri_label(x):
 merged["reliability"] = merged["sri"].apply(sri_label)
 
 # ─────────────────────────────────────────────
+# SHARED LIVE DATA  (fetched once, used by Tab 2 and Tab 3)
+# Both tabs must see the exact same snapshot so a train visible on
+# the map is always available in the Journey Profiler dropdown.
+# ─────────────────────────────────────────────
+_shared_trains_df = get_running_trains()
+
+# ─────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs(["📊  Station Analysis", "🗺️  Live Network Map", "🔍  Journey Profiler", "🚄  Fleet Scorecard"])
@@ -191,7 +198,7 @@ with tab1:
     high_risk_pct = (view["reliability"] == "High Risk").sum() / max(total_trains, 1) * 100
     avg_sri       = view["sri"].mean()
 
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3 = st.columns(3)
     def metric_card(col, label, value, sub=""):
         col.markdown(f"""
             <div class="metric-card">
@@ -201,36 +208,35 @@ with tab1:
             </div>
         """, unsafe_allow_html=True)
 
-    metric_card(k1, "Trains in view",   total_trains,           f"at {station}")
-    metric_card(k2, "Avg. delay",       f"{avg_delay:.1f} min", "across all services")
-    metric_card(k3, "High-risk trains", f"{high_risk_pct:.0f}%","SRI ≥ 7")
-    metric_card(k4, "Avg. risk score",  f"{avg_sri:.1f}",       "Service Risk Index")
+    metric_card(k1, "Avg. delay",       f"{avg_delay:.1f} min", "across all services")
+    metric_card(k2, "High-risk trains", f"{high_risk_pct:.0f}%","SRI ≥ 7")
+    metric_card(k3, "Avg. risk score",  f"{avg_sri:.1f}",       "Service Risk Index")
     st.markdown("<br>", unsafe_allow_html=True)
 
     # Row 1
     col_l, col_r = st.columns([1, 1], gap="large")
     with col_l:
         st.markdown('<p class="section-title">Train Service Risk Index</p>', unsafe_allow_html=True)
-        st.markdown('<p class="caption-text">SRI combines average lateness and delay frequency — higher = less reliable.</p>', unsafe_allow_html=True)
+        st.markdown('<p class="caption-text">SRI combines average lateness and delay frequency — higher = less reliable. Showing top 12 highest-risk trains.</p>', unsafe_allow_html=True)
         fig_sri = go.Figure(go.Bar(
-            y=view["traincode"],
-            x=view["sri"],
+            y=view.tail(12)["traincode"],
+            x=view.tail(12)["sri"],
             orientation="h",
             marker=dict(
-                color=view["sri"],
+                color=view.tail(12)["sri"],
                 colorscale=[[0,"#22c55e"],[0.43,"#f59e0b"],[1,"#ef4444"]],
                 cmin=0, cmax=10, line=dict(width=0),
             ),
-            text=view["reliability"], textposition="inside", insidetextanchor="middle",
-            customdata=view["destination"],
+            text=view.tail(12)["reliability"], textposition="inside", insidetextanchor="middle",
+            customdata=view.tail(12)["destination"],
             hovertemplate="<b>%{y}</b><br>SRI: %{x:.1f}<br>To: %{customdata}<extra></extra>",
         ))
         fig_sri.update_layout(
             xaxis=dict(title="Service Risk Index", range=[0, max(view["sri"].max()*1.15, 10)], gridcolor="#2e3350"),
-            yaxis=dict(title="", tickfont=dict(size=11)),
+            yaxis=dict(title="", tickfont=dict(size=10)),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=30),
-            height=max(250, len(view)*38), showlegend=False,
+            font=dict(color="#c9cfe8", size=11), margin=dict(l=10,r=10,t=10,b=30),
+            height=max(250, min(len(view), 12)*24), showlegend=False,
         )
         st.plotly_chart(fig_sri, width="stretch")
 
@@ -251,7 +257,7 @@ with tab1:
             yaxis=dict(title="Avg Delay (min)", gridcolor="#2e3350"),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=30),
-            height=max(250, len(view)*38),
+            height=280,
         )
         st.plotly_chart(fig_ts, width="stretch")
 
@@ -290,7 +296,7 @@ with tab1:
             coloraxis_colorbar=dict(title="SRI", tickfont=dict(size=10), thickness=12, len=0.8),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#c9cfe8"), margin=dict(l=10,r=10,t=10,b=60),
-            height=max(320, n_rows*40+80),
+            height=max(280, n_rows*28+60),
         )
         st.plotly_chart(fig_hm, width="stretch")
 
@@ -309,7 +315,7 @@ with tab1:
             yaxis=dict(title="", tickfont=dict(size=10)),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=30),
-            height=max(320, len(station_risk)*32+80), showlegend=False,
+            height=max(280, len(station_risk)*22+60), showlegend=False,
         )
         st.plotly_chart(fig_cong, width="stretch")
 
@@ -342,7 +348,7 @@ with tab2:
     st.markdown('<p class="caption-text">All running trains plotted in real time. Colour = how late the train is. Size of station dot = congestion risk (SRI). Refreshes every 15 seconds.</p>', unsafe_allow_html=True)
 
     with st.spinner("Fetching live data…"):
-        trains_df   = get_running_trains()
+        trains_df   = _shared_trains_df
         stations_df = get_all_stations()
 
     if trains_df.empty or stations_df.empty:
@@ -529,7 +535,7 @@ with tab3:
     st.markdown('<p class="caption-text">Pick any running train to see a stop-by-stop breakdown of scheduled vs actual times — showing exactly where and how delays build up (or recover) along the route.</p>', unsafe_allow_html=True)
 
     with st.spinner("Loading running trains…"):
-        live_trains = get_running_trains()
+        live_trains = _shared_trains_df
 
     if live_trains.empty:
         st.error("Could not reach the Rail API.")
@@ -543,13 +549,21 @@ with tab3:
             msg = str(row.get("publicmessage",""))
             m = re.search(r"-\s(.+?)\s+\(", msg.replace("\\n","\n"))
             route = m.group(1) if m else row.get("direction","")
+            # Include traincode in label to guarantee uniqueness
             return f"{row['traincode']}  —  {route}"
 
         if not running_opts.empty:
+            running_opts = running_opts.copy()
             running_opts["label"] = running_opts.apply(option_label, axis=1)
-            label_to_code = dict(zip(running_opts["label"], running_opts["traincode"]))
+            # Drop duplicate train codes (API occasionally returns the same train twice)
+            running_opts = running_opts.drop_duplicates(subset="traincode", keep="first")
+            # Keep dict keyed by traincode, not label, then build sorted label list
+            code_to_label = dict(zip(running_opts["traincode"], running_opts["label"]))
+            label_to_code = {v: k for k, v in code_to_label.items()}
+            sorted_labels  = sorted(label_to_code.keys())
         else:
             label_to_code = {}
+            sorted_labels  = []
 
         pcol1, pcol2 = st.columns([1, 3], gap="large")
         with pcol1:
@@ -562,7 +576,7 @@ with tab3:
             if not running_opts.empty:
                 selected_label = st.selectbox(
                     "Or pick a currently running train",
-                    list(label_to_code.keys()),
+                    sorted_labels,
                 )
                 dropdown_code = label_to_code[selected_label]
             else:
@@ -945,109 +959,7 @@ with tab4:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ── ROW: Delay breakdown stacked bar + radar ──────────────
-        chart_l, chart_r = st.columns([1.1, 1], gap="large")
-
-        with chart_l:
-            st.markdown('<p class="section-title">Delay Severity Breakdown</p>', unsafe_allow_html=True)
-            st.markdown('<p class="caption-text">Average number of trains per snapshot in each delay category — normalised by snapshot count so all fleets are comparable regardless of how long the collector has been running.</p>', unsafe_allow_html=True)
-
-            # Use per-snapshot averages so fleets with more history aren't penalised
-            stack_df = stats_df.copy()
-            stack_df["avg_on_time"]    = stack_df["on_time"]      / stack_df["snapshots"]
-            stack_df["avg_slightly"]   = stack_df["slightly_late"] / stack_df["snapshots"]
-            # avg_sig already stored in fleet_stats dict
-
-            fig_stack = go.Figure()
-            categories = [
-                ("On time",      "avg_on_time",  "#22c55e"),
-                ("1–5 min late", "avg_slightly", "#f59e0b"),
-                (">5 min late",  "avg_sig",       "#ef4444"),
-            ]
-            for label, key, color in categories:
-                fig_stack.add_trace(go.Bar(
-                    name=label,
-                    x=stack_df["fleet"],
-                    y=stack_df[key].round(1),
-                    marker=dict(color=color, line=dict(width=0)),
-                    hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:.1f}} avg per snapshot<extra></extra>",
-                ))
-
-            fig_stack.update_layout(
-                barmode="stack",
-                xaxis=dict(title="Fleet Type"),
-                yaxis=dict(title="Avg trains per snapshot", gridcolor="#2e3350"),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c9cfe8", size=12),
-                legend=dict(
-                    bgcolor="#1e2130", bordercolor="#2e3350", borderwidth=1,
-                    orientation="h", x=0, y=1.12,
-                    font=dict(color="#c9cfe8", size=11),
-                ),
-                margin=dict(l=10, r=10, t=30, b=10),
-                height=320,
-            )
-            st.plotly_chart(fig_stack, width="stretch")
-
-        with chart_r:
-            st.markdown('<p class="section-title">Multi-Dimension Performance Radar</p>', unsafe_allow_html=True)
-            st.markdown('<p class="caption-text">Each axis is a performance dimension — larger area = better overall fleet performance.</p>', unsafe_allow_html=True)
-
-            radar_dims = ["Punctuality", "Low avg delay", "Fleet size", "Reliability score"]
-
-            fig_radar = go.Figure()
-            for row in fleet_stats:
-                total_max   = max(s["total"] for s in fleet_stats) or 1
-                delay_max   = max(s["avg_delay"] for s in fleet_stats) or 1
-                sig_max     = max(s["avg_sig"] for s in fleet_stats) or 1
-
-                # Normalise each dimension to 0-100 (higher = better)
-                punct_score    = row["punctuality"]                                         # already 0-100
-                low_delay      = max(0, 100 - (row["avg_delay"] / max(delay_max, 0.1)) * 100)
-                fleet_coverage = (row["total"] / total_max) * 100
-                reliability    = max(0, 100 - (row["avg_sig"] / max(sig_max, 0.1)) * 100)  # per-snapshot avg
-
-                values = [punct_score, low_delay, fleet_coverage, reliability]
-                values_closed = values + [values[0]]
-                dims_closed   = radar_dims + [radar_dims[0]]
-
-                fig_radar.add_trace(go.Scatterpolar(
-                    r=values_closed,
-                    theta=dims_closed,
-                    fill="toself",
-                    name=row["fleet"],
-                    line=dict(color=row["color"], width=2),
-                    fillcolor=hex_to_rgba(row["color"], 0.15),
-                    hovertemplate="<b>" + row["fleet"] + "</b><br>%{theta}: %{r:.0f}<extra></extra>",
-                ))
-
-            fig_radar.update_layout(
-                polar=dict(
-                    bgcolor="#1e2130",
-                    radialaxis=dict(
-                        visible=True, range=[0, 100],
-                        gridcolor="#2e3350", tickfont=dict(size=9, color="#6b7294"),
-                        tickvals=[25, 50, 75, 100],
-                    ),
-                    angularaxis=dict(
-                        gridcolor="#2e3350",
-                        tickfont=dict(size=11, color="#c9cfe8"),
-                    ),
-                ),
-                paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c9cfe8", size=12),
-                legend=dict(
-                    bgcolor="#1e2130", bordercolor="#2e3350", borderwidth=1,
-                    orientation="h", x=0.15, y=-0.1,
-                    font=dict(color="#c9cfe8", size=11),
-                ),
-                margin=dict(l=20, r=20, t=20, b=20),
-                height=320,
-            )
-            st.plotly_chart(fig_radar, width="stretch")
-
-        # ── ROW: Average delay comparison bar + punctuality trend ──
+        # ── ROW: Delay severity + Average delay side by side ──────
         chart2_l, chart2_r = st.columns([1, 1], gap="large")
 
         with chart2_l:
@@ -1079,50 +991,42 @@ with tab4:
             st.plotly_chart(fig_avg, width="stretch")
 
         with chart2_r:
-            st.markdown('<p class="section-title">Fleet Punctuality by Average Size</p>', unsafe_allow_html=True)
-            st.markdown('<p class="caption-text">Each bubble is a fleet type. Height = on-time rate. Bubble size = avg trains running per snapshot. Reveals whether larger fleets maintain punctuality over time.</p>', unsafe_allow_html=True)
+            st.markdown('<p class="section-title">Delay Severity Breakdown</p>', unsafe_allow_html=True)
+            st.markdown('<p class="caption-text">Average number of trains per snapshot in each delay category — normalised by snapshot count so all fleets are comparable regardless of how long the collector has been running.</p>', unsafe_allow_html=True)
 
-            fig_bubble = go.Figure()
-            for row in fleet_stats:
-                fig_bubble.add_trace(go.Scatter(
-                    x=[row["fleet"]],
-                    y=[row["punctuality"]],
-                    mode="markers+text",
-                    marker=dict(
-                        size=max(20, row["total"] * 2.5),
-                        color=row["color"],
-                        opacity=0.8,
-                        line=dict(width=1.5, color="white"),
-                    ),
-                    text=[f"{row['punctuality']:.0f}%"],
-                    textposition="middle center",
-                    textfont=dict(size=13, color="white"),
-                    name=row["fleet"],
-                    hovertemplate=(
-                        f"<b>{row['fleet']}</b><br>"
-                        f"On-time: {row['punctuality']:.0f}%<br>"
-                        f"Running trains: {row['total']}<br>"
-                        f"Avg delay: {row['avg_delay']} min"
-                        "<extra></extra>"
-                    ),
+            stack_df = stats_df.copy()
+            stack_df["avg_on_time"]  = stack_df["on_time"]       / stack_df["snapshots"]
+            stack_df["avg_slightly"] = stack_df["slightly_late"]  / stack_df["snapshots"]
+
+            fig_stack = go.Figure()
+            for label, key, color in [
+                ("On time",      "avg_on_time",  "#22c55e"),
+                ("1–5 min late", "avg_slightly", "#f59e0b"),
+                (">5 min late",  "avg_sig",       "#ef4444"),
+            ]:
+                fig_stack.add_trace(go.Bar(
+                    name=label,
+                    x=stack_df["fleet"],
+                    y=stack_df[key].round(1),
+                    marker=dict(color=color, line=dict(width=0)),
+                    hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:.1f}} avg per snapshot<extra></extra>",
                 ))
-
-            fig_bubble.add_hline(
-                y=80, line=dict(color="#2e3350", dash="dash", width=1.5),
-                annotation_text="80% target", annotation_font=dict(color="#6b7294", size=10),
-                annotation_position="right",
-            )
-            fig_bubble.update_layout(
-                xaxis=dict(title="Fleet Type", showgrid=False),
-                yaxis=dict(title="On-Time Rate (%)", range=[0, 105], gridcolor="#2e3350"),
+            fig_stack.update_layout(
+                barmode="stack",
+                xaxis=dict(title="Fleet Type"),
+                yaxis=dict(title="Avg trains per snapshot", gridcolor="#2e3350"),
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
                 font=dict(color="#c9cfe8", size=12),
-                margin=dict(l=10, r=60, t=10, b=10),
+                legend=dict(
+                    bgcolor="#1e2130", bordercolor="#2e3350", borderwidth=1,
+                    orientation="h", x=0, y=1.12,
+                    font=dict(color="#c9cfe8", size=11),
+                ),
+                margin=dict(l=10, r=10, t=30, b=10),
                 height=280,
-                showlegend=False,
             )
-            st.plotly_chart(fig_bubble, width="stretch")
+            st.plotly_chart(fig_stack, width="stretch")
 
         # ── Insight banner ────────────────────────────────────────
         st.markdown("<br>", unsafe_allow_html=True)
