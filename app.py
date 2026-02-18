@@ -8,14 +8,18 @@ import requests
 from io import StringIO
 import re
 from datetime import datetime, date
+import os
+from dotenv import load_dotenv
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-DB = create_engine("sqlite:///irish_rail.db")
-BASE = "http://api.irishrail.ie/realtime/realtime.asmx"
+load_dotenv()
 
-st.set_page_config(layout="wide", page_title="Irish Rail Intelligence", page_icon="🚆")
+DB = create_engine(os.getenv("DATABASE_URL"))
+BASE = os.getenv("API_BASE_URL")
+
+st.set_page_config(layout="wide", page_title="Rail Intelligence", page_icon="🚆")
 
 st.markdown("""
 <style>
@@ -53,7 +57,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("## 🚆 Irish Rail — Operational Intelligence Dashboard")
+st.markdown("## 🚆 Rail — Operational Intelligence Dashboard")
 st.markdown("<p style='color:#6b7294;font-size:0.85rem;margin-top:-10px;'>Live train performance, network map and journey drill-down</p>", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
@@ -342,7 +346,7 @@ with tab2:
         stations_df = get_all_stations()
 
     if trains_df.empty or stations_df.empty:
-        st.error("Could not reach the Irish Rail API. Check your connection.")
+        st.error("Could not reach the Rail API. Check your connection.")
     else:
         trains_df.columns   = trains_df.columns.str.strip().str.lower()
         stations_df.columns = stations_df.columns.str.strip().str.lower()
@@ -528,7 +532,7 @@ with tab3:
         live_trains = get_running_trains()
 
     if live_trains.empty:
-        st.error("Could not reach the Irish Rail API.")
+        st.error("Could not reach the Rail API.")
     else:
         live_trains.columns = live_trains.columns.str.strip().str.lower()
 
@@ -817,7 +821,7 @@ with tab4:
         fleet_train_rows.append(running)
 
     if not fleet_stats:
-        st.error("Could not fetch fleet data from the Irish Rail API.")
+        st.error("Could not fetch fleet data from the Rail API.")
     else:
         stats_df = pd.DataFrame(fleet_stats)
 
