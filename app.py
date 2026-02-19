@@ -7,7 +7,7 @@ from plotly.subplots import make_subplots
 import requests
 from io import StringIO
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import os
 from dotenv import load_dotenv
 
@@ -142,6 +142,47 @@ def minutes_to_hhmm(m):
     h, mins = divmod(int(m), 60)
     return f"{h:02d}:{mins:02d}"
 
+def sri_label(x):
+    if x < 3:  return "Reliable"
+    elif x < 7: return "Moderate"
+    else:       return "High Risk"
+
+def build_day_options(date_series):
+    available_dates = sorted(pd.Series(date_series).dropna().unique(), reverse=True)
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    day_options = ["All days"]
+    day_map = {}
+    if today in available_dates:
+        day_options.append("Today")
+        day_map["Today"] = today
+    if yesterday in available_dates:
+        day_options.append("Yesterday")
+        day_map["Yesterday"] = yesterday
+    for d in available_dates:
+        if d in (today, yesterday):
+            continue
+        label = d.strftime("%d %b %Y")
+        day_options.append(label)
+        day_map[label] = d
+    return day_options, day_map
+
+def build_sri_view(data):
+    if data.empty:
+        return pd.DataFrame()
+    risk = data.groupby("traincode")["late"].agg(["mean", "count"])
+    risk["delay_freq"] = (
+        data[data["late"] > 5].groupby("traincode")["late"].count() / risk["count"]
+    ).fillna(0)
+    risk["sri"] = (0.5 * risk["mean"]) + (0.5 * risk["delay_freq"] * 10)
+    risk = risk.reset_index()
+
+    latest = data.sort_values("timestamp").groupby("traincode").tail(1)
+    merged = latest.merge(risk[["traincode", "sri"]], on="traincode")
+    merged["reliability"] = merged["sri"].apply(sri_label)
+    return merged
+
 # ─────────────────────────────────────────────
 # LOAD HISTORICAL DB DATA
 # ─────────────────────────────────────────────
@@ -154,24 +195,10 @@ if df.empty:
 df["late"]      = pd.to_numeric(df["late"],  errors="coerce").fillna(0).clip(lower=0)
 df["duein"]     = pd.to_numeric(df["duein"], errors="coerce").fillna(0)
 df["timestamp"] = pd.to_datetime(df["timestamp"])
+df["date"]      = df["timestamp"].dt.date
 
 # SRI calculation
-risk = df.groupby("traincode")["late"].agg(["mean", "count"])
-risk["delay_freq"] = (
-    df[df["late"] > 5].groupby("traincode")["late"].count() / risk["count"]
-).fillna(0)
-risk["sri"] = (0.5 * risk["mean"]) + (0.5 * risk["delay_freq"] * 10)
-risk = risk.reset_index()
-
-latest = df.sort_values("timestamp").groupby("traincode").tail(1)
-merged = latest.merge(risk[["traincode", "sri"]], on="traincode")
-
-def sri_label(x):
-    if x < 3:  return "Reliable"
-    elif x < 7: return "Moderate"
-    else:       return "High Risk"
-
-merged["reliability"] = merged["sri"].apply(sri_label)
+merged = build_sri_view(df)
 
 # ─────────────────────────────────────────────
 # SHARED LIVE DATA  (fetched once, used by Tab 2 and Tab 3)
@@ -183,161 +210,187 @@ _shared_trains_df = get_running_trains()
 # ─────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["📊  Station Analysis", "🗺️  Live Network Map", "🔍  Journey Profiler", "🚄  Fleet Scorecard"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊  Station Analysis",
+    "🗺️  Live Network Map",
+    "🔍  Journey Profiler",
+    "🚄  Fleet Scorecard",
+    "📌  Snapshot Overview",
+])
 
 # ════════════════════════════════════════════════════════════════════
 # TAB 1 — STATION ANALYSIS (existing dashboard)
 # ════════════════════════════════════════════════════════════════════
 with tab1:
-    station = st.selectbox("📍 Select Station", sorted(merged["stationfullname"].unique()))
-    view = merged[merged["stationfullname"] == station].copy().sort_values("sri", ascending=True)
+    day_options, day_map = build_day_options(df["date"])
+    filter_col, station_col = st.columns([1, 1], gap="large")
+    with filter_col:
+        selected_day = st.selectbox("🗓️ Filter by day", day_options, index=0)
+    if selected_day == "All days":
+        filtered_df = df
+    else:
+        filtered_df = df[df["date"] == day_map[selected_day]].copy()
 
-    # KPI cards
-    total_trains  = len(view)
-    avg_delay     = view["late"].mean()
-    high_risk_pct = (view["reliability"] == "High Risk").sum() / max(total_trains, 1) * 100
-    avg_sri       = view["sri"].mean()
+    if filtered_df.empty:
+        with station_col:
+            st.selectbox("📍 Select Station", ["No stations available"], index=0)
+        st.warning("No data available for the selected day yet.")
+    else:
+        filtered_merged = build_sri_view(filtered_df)
+        if filtered_merged.empty:
+            with station_col:
+                st.selectbox("📍 Select Station", ["No stations available"], index=0)
+            st.warning("No data available for the selected day yet.")
+        else:
+            with station_col:
+                station = st.selectbox("📍 Select Station", sorted(filtered_merged["stationfullname"].unique()))
+            view = filtered_merged[filtered_merged["stationfullname"] == station].copy().sort_values("sri", ascending=True)
+            # KPI cards
+            total_trains  = len(view)
+            avg_delay     = view["late"].mean()
+            high_risk_pct = (view["reliability"] == "High Risk").sum() / max(total_trains, 1) * 100
+            avg_sri       = view["sri"].mean()
 
-    k1, k2, k3 = st.columns(3)
-    def metric_card(col, label, value, sub=""):
-        col.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">{label}</div>
-                <div class="metric-value">{value}</div>
-                <div class="metric-sub">{sub}</div>
-            </div>
-        """, unsafe_allow_html=True)
+            k1, k2, k3 = st.columns(3)
+            def metric_card(col, label, value, sub=""):
+                col.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-label">{label}</div>
+                        <div class="metric-value">{value}</div>
+                        <div class="metric-sub">{sub}</div>
+                    </div>
+                """, unsafe_allow_html=True)
 
-    metric_card(k1, "Avg. delay",       f"{avg_delay:.1f} min", "across all services")
-    metric_card(k2, "High-risk trains", f"{high_risk_pct:.0f}%","SRI ≥ 7")
-    metric_card(k3, "Avg. risk score",  f"{avg_sri:.1f}",       "Service Risk Index")
-    st.markdown("<br>", unsafe_allow_html=True)
+            metric_card(k1, "Avg. delay",       f"{avg_delay:.1f} min", "across all services")
+            metric_card(k2, "High-risk trains", f"{high_risk_pct:.0f}%","SRI ≥ 7")
+            metric_card(k3, "Avg. risk score",  f"{avg_sri:.1f}",       "Service Risk Index")
+            st.markdown("<br>", unsafe_allow_html=True)
 
-    # Row 1
-    col_l, col_r = st.columns([1, 1], gap="large")
-    with col_l:
-        st.markdown('<p class="section-title">Train Service Risk Index</p>', unsafe_allow_html=True)
-        st.markdown('<p class="caption-text">SRI combines average lateness and delay frequency — higher = less reliable. Showing top 12 highest-risk trains.</p>', unsafe_allow_html=True)
-        fig_sri = go.Figure(go.Bar(
-            y=view.tail(12)["traincode"],
-            x=view.tail(12)["sri"],
-            orientation="h",
-            marker=dict(
-                color=view.tail(12)["sri"],
-                colorscale=[[0,"#22c55e"],[0.43,"#f59e0b"],[1,"#ef4444"]],
-                cmin=0, cmax=10, line=dict(width=0),
-            ),
-            text=view.tail(12)["reliability"], textposition="inside", insidetextanchor="middle",
-            customdata=view.tail(12)["destination"],
-            hovertemplate="<b>%{y}</b><br>SRI: %{x:.1f}<br>To: %{customdata}<extra></extra>",
-        ))
-        fig_sri.update_layout(
-            xaxis=dict(title="Service Risk Index", range=[0, max(view["sri"].max()*1.15, 10)], gridcolor="#2e3350"),
-            yaxis=dict(title="", tickfont=dict(size=10)),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#c9cfe8", size=11), margin=dict(l=10,r=10,t=10,b=30),
-            height=max(250, min(len(view), 12)*24), showlegend=False,
-        )
-        st.plotly_chart(fig_sri, width="stretch")
+            # Row 1
+            col_l, col_r = st.columns([1, 1], gap="large")
+            with col_l:
+                st.markdown('<p class="section-title">Train Service Risk Index</p>', unsafe_allow_html=True)
+                st.markdown('<p class="caption-text">SRI combines average lateness and delay frequency — higher = less reliable. Showing top 12 highest-risk trains.</p>', unsafe_allow_html=True)
+                fig_sri = go.Figure(go.Bar(
+                    y=view.tail(12)["traincode"],
+                    x=view.tail(12)["sri"],
+                    orientation="h",
+                    marker=dict(
+                        color=view.tail(12)["sri"],
+                        colorscale=[[0,"#22c55e"],[0.43,"#f59e0b"],[1,"#ef4444"]],
+                        cmin=0, cmax=10, line=dict(width=0),
+                    ),
+                    text=view.tail(12)["reliability"], textposition="inside", insidetextanchor="middle",
+                    customdata=view.tail(12)["destination"],
+                    hovertemplate="<b>%{y}</b><br>SRI: %{x:.1f}<br>To: %{customdata}<extra></extra>",
+                ))
+                fig_sri.update_layout(
+                    xaxis=dict(title="Service Risk Index", range=[0, max(view["sri"].max()*1.15, 10)], gridcolor="#2e3350"),
+                    yaxis=dict(title="", tickfont=dict(size=10)),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#c9cfe8", size=11), margin=dict(l=10,r=10,t=10,b=30),
+                    height=max(250, min(len(view), 12)*24), showlegend=False,
+                )
+                st.plotly_chart(fig_sri, width="stretch")
 
-    with col_r:
-        st.markdown('<p class="section-title">Delay Trend — Last 24 Hours</p>', unsafe_allow_html=True)
-        st.markdown('<p class="caption-text">15-minute rolling average delay. Peaks signal recurring congestion windows.</p>', unsafe_allow_html=True)
-        df_station = df[df["stationfullname"] == station].copy()
-        ts = df_station.set_index("timestamp").resample("15min")["late"].mean().dropna().reset_index()
-        ts.columns = ["time", "avg_delay"]
-        fig_ts = go.Figure(go.Scatter(
-            x=ts["time"], y=ts["avg_delay"], mode="lines",
-            fill="tozeroy", line=dict(color="#6366f1", width=2.5),
-            fillcolor="rgba(99,102,241,0.15)",
-            hovertemplate="%{x|%H:%M}<br>Avg delay: %{y:.1f} min<extra></extra>",
-        ))
-        fig_ts.update_layout(
-            xaxis=dict(title="Time", gridcolor="#2e3350", tickformat="%H:%M"),
-            yaxis=dict(title="Avg Delay (min)", gridcolor="#2e3350"),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=30),
-            height=280,
-        )
-        st.plotly_chart(fig_ts, width="stretch")
+            with col_r:
+                st.markdown('<p class="section-title">Delay Trend — Selected Day</p>', unsafe_allow_html=True)
+                st.markdown('<p class="caption-text">15-minute rolling average delay, filtered by the day selector above.</p>', unsafe_allow_html=True)
+                df_station = filtered_df[filtered_df["stationfullname"] == station].copy()
+                ts = df_station.set_index("timestamp").resample("15min")["late"].mean().dropna().reset_index()
+                ts.columns = ["time", "avg_delay"]
+                fig_ts = go.Figure(go.Scatter(
+                    x=ts["time"], y=ts["avg_delay"], mode="lines",
+                    fill="tozeroy", line=dict(color="#6366f1", width=2.5),
+                    fillcolor="rgba(99,102,241,0.15)",
+                    hovertemplate="%{x|%H:%M}<br>Avg delay: %{y:.1f} min<extra></extra>",
+                ))
+                fig_ts.update_layout(
+                    xaxis=dict(title="Time", gridcolor="#2e3350", tickformat="%H:%M"),
+                    yaxis=dict(title="Avg Delay (min)", gridcolor="#2e3350"),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=30),
+                    height=280,
+                )
+                st.plotly_chart(fig_ts, width="stretch")
 
-    # Row 2
-    col2_l, col2_r = st.columns([1.4, 1], gap="large")
-    with col2_l:
-        st.markdown('<p class="section-title">Corridor Reliability Heatmap</p>', unsafe_allow_html=True)
-        st.markdown('<p class="caption-text">SRI per Origin → Destination corridor for trains serving this station. Green = reliable, Red = high risk.</p>', unsafe_allow_html=True)
+            # Row 2
+            col2_l, col2_r = st.columns([1.4, 1], gap="large")
+            with col2_l:
+                st.markdown('<p class="section-title">Corridor Reliability Heatmap</p>', unsafe_allow_html=True)
+                st.markdown('<p class="caption-text">SRI per Origin → Destination corridor for trains serving this station. Green = reliable, Red = high risk.</p>', unsafe_allow_html=True)
 
-        # Filter to corridors involving trains that serve the selected station
-        trains_at_station = view["traincode"].unique()
-        df_station_corridors = df[df["traincode"].isin(trains_at_station)]
+                # Filter to corridors involving trains that serve the selected station
+                trains_at_station = view["traincode"].unique()
+                df_station_corridors = filtered_df[filtered_df["traincode"].isin(trains_at_station)]
 
-        corridor = df_station_corridors.groupby(["origin","destination"])["late"].agg(["mean","count"])
-        corridor["delay_freq"] = (
-            df_station_corridors[df_station_corridors["late"]>5].groupby(["origin","destination"])["late"].count() / corridor["count"]
-        ).fillna(0)
-        corridor["sri"] = (0.5*corridor["mean"])+(0.5*corridor["delay_freq"]*10)
-        corridor = corridor.reset_index()
-        heatmap_df = corridor.pivot(index="origin", columns="destination", values="sri").fillna(0)
-        TOP_N = 15
-        top_origins = corridor.groupby("origin")["sri"].mean().nlargest(TOP_N).index
-        top_dests   = corridor.groupby("destination")["sri"].mean().nlargest(TOP_N).index
-        heatmap_df  = heatmap_df.loc[heatmap_df.index.isin(top_origins), heatmap_df.columns.isin(top_dests)]
-        n_rows, _ = heatmap_df.shape
-        fig_hm = px.imshow(
-            heatmap_df, text_auto=".1f",
-            color_continuous_scale=[[0,"#16a34a"],[0.5,"#ca8a04"],[1,"#dc2626"]],
-            zmin=0, labels=dict(color="SRI"), aspect="auto",
-        )
-        fig_hm.update_traces(textfont=dict(size=10, color="white"),
-            hovertemplate="Origin: %{y}<br>Dest: %{x}<br>SRI: %{z:.1f}<extra></extra>")
-        fig_hm.update_layout(
-            xaxis=dict(title="Destination", tickangle=-35, tickfont=dict(size=10), side="bottom"),
-            yaxis=dict(title="Origin", tickfont=dict(size=10), autorange="reversed"),
-            coloraxis_colorbar=dict(title="SRI", tickfont=dict(size=10), thickness=12, len=0.8),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#c9cfe8"), margin=dict(l=10,r=10,t=10,b=60),
-            height=max(280, n_rows*28+60),
-        )
-        st.plotly_chart(fig_hm, width="stretch")
+                corridor = df_station_corridors.groupby(["origin","destination"])["late"].agg(["mean","count"])
+                corridor["delay_freq"] = (
+                    df_station_corridors[df_station_corridors["late"]>5].groupby(["origin","destination"])["late"].count() / corridor["count"]
+                ).fillna(0)
+                corridor["sri"] = (0.5*corridor["mean"])+(0.5*corridor["delay_freq"]*10)
+                corridor = corridor.reset_index()
+                heatmap_df = corridor.pivot(index="origin", columns="destination", values="sri").fillna(0)
+                TOP_N = 15
+                top_origins = corridor.groupby("origin")["sri"].mean().nlargest(TOP_N).index
+                top_dests   = corridor.groupby("destination")["sri"].mean().nlargest(TOP_N).index
+                heatmap_df  = heatmap_df.loc[heatmap_df.index.isin(top_origins), heatmap_df.columns.isin(top_dests)]
+                n_rows, _ = heatmap_df.shape
+                fig_hm = px.imshow(
+                    heatmap_df, text_auto=".1f",
+                    color_continuous_scale=[[0,"#16a34a"],[0.5,"#ca8a04"],[1,"#dc2626"]],
+                    zmin=0, labels=dict(color="SRI"), aspect="auto",
+                )
+                fig_hm.update_traces(textfont=dict(size=10, color="white"),
+                    hovertemplate="Origin: %{y}<br>Dest: %{x}<br>SRI: %{z:.1f}<extra></extra>")
+                fig_hm.update_layout(
+                    xaxis=dict(title="Destination", tickangle=-35, tickfont=dict(size=10), side="bottom"),
+                    yaxis=dict(title="Origin", tickfont=dict(size=10), autorange="reversed"),
+                    coloraxis_colorbar=dict(title="SRI", tickfont=dict(size=10), thickness=12, len=0.8),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#c9cfe8"), margin=dict(l=10,r=10,t=10,b=60),
+                    height=max(280, n_rows*28+60),
+                )
+                st.plotly_chart(fig_hm, width="stretch")
 
-    with col2_r:
-        st.markdown('<p class="section-title">Station Congestion Risk</p>', unsafe_allow_html=True)
-        st.markdown('<p class="caption-text">Total SRI load per station — higher means more at-risk services arriving.</p>', unsafe_allow_html=True)
-        station_risk = merged.groupby("stationfullname")["sri"].sum().sort_values(ascending=True).reset_index()
-        fig_cong = go.Figure(go.Bar(
-            x=station_risk["sri"], y=station_risk["stationfullname"], orientation="h",
-            marker=dict(color=station_risk["sri"],
-                colorscale=[[0,"#22c55e"],[0.5,"#f59e0b"],[1,"#ef4444"]], line=dict(width=0)),
-            hovertemplate="%{y}<br>Total SRI: %{x:.1f}<extra></extra>",
-        ))
-        fig_cong.update_layout(
-            xaxis=dict(title="Total SRI", gridcolor="#2e3350"),
-            yaxis=dict(title="", tickfont=dict(size=10)),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=30),
-            height=max(280, len(station_risk)*22+60), showlegend=False,
-        )
-        st.plotly_chart(fig_cong, width="stretch")
+            with col2_r:
+                st.markdown('<p class="section-title">Station Congestion Risk</p>', unsafe_allow_html=True)
+                st.markdown('<p class="caption-text">Total SRI load per station — higher means more at-risk services arriving.</p>', unsafe_allow_html=True)
+                station_risk = filtered_merged.groupby("stationfullname")["sri"].sum().sort_values(ascending=True).reset_index()
+                fig_cong = go.Figure(go.Bar(
+                    x=station_risk["sri"], y=station_risk["stationfullname"], orientation="h",
+                    marker=dict(color=station_risk["sri"],
+                        colorscale=[[0,"#22c55e"],[0.5,"#f59e0b"],[1,"#ef4444"]], line=dict(width=0)),
+                    hovertemplate="%{y}<br>Total SRI: %{x:.1f}<extra></extra>",
+                ))
+                fig_cong.update_layout(
+                    xaxis=dict(title="Total SRI", gridcolor="#2e3350"),
+                    yaxis=dict(title="", tickfont=dict(size=10)),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=30),
+                    height=max(280, len(station_risk)*22+60), showlegend=False,
+                )
+                st.plotly_chart(fig_cong, width="stretch")
 
-    # Row 3
-    st.markdown('<p class="section-title">Most Unpredictable Train Services</p>', unsafe_allow_html=True)
-    st.markdown('<p class="caption-text">Services with highest delay variability. High std. deviation = hard to plan around even if average SRI looks moderate.</p>', unsafe_allow_html=True)
-    train_var = df.groupby("traincode")["late"].std().dropna().sort_values(ascending=False).head(12).reset_index()
-    train_var.columns = ["traincode","std_delay"]
-    fig_var = go.Figure(go.Bar(
-        x=train_var["traincode"], y=train_var["std_delay"],
-        marker=dict(color=train_var["std_delay"],
-            colorscale=[[0,"#6366f1"],[1,"#ef4444"]], line=dict(width=0)),
-        hovertemplate="Train: %{x}<br>Std deviation: %{y:.1f} min<extra></extra>",
-    ))
-    fig_var.update_layout(
-        xaxis=dict(title="Train Code", tickangle=-30),
-        yaxis=dict(title="Delay Std. Deviation (min)", gridcolor="#2e3350"),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=60),
-        height=280, showlegend=False,
-    )
-    st.plotly_chart(fig_var, width="stretch")
+            # Row 3
+            st.markdown('<p class="section-title">Most Unpredictable Train Services</p>', unsafe_allow_html=True)
+            st.markdown('<p class="caption-text">Services with highest delay variability. High std. deviation = hard to plan around even if average SRI looks moderate.</p>', unsafe_allow_html=True)
+            train_var = filtered_df.groupby("traincode")["late"].std().dropna().sort_values(ascending=False).head(12).reset_index()
+            train_var.columns = ["traincode","std_delay"]
+            fig_var = go.Figure(go.Bar(
+                x=train_var["traincode"], y=train_var["std_delay"],
+                marker=dict(color=train_var["std_delay"],
+                    colorscale=[[0,"#6366f1"],[1,"#ef4444"]], line=dict(width=0)),
+                hovertemplate="Train: %{x}<br>Std deviation: %{y:.1f} min<extra></extra>",
+            ))
+            fig_var.update_layout(
+                xaxis=dict(title="Train Code", tickangle=-30),
+                yaxis=dict(title="Delay Std. Deviation (min)", gridcolor="#2e3350"),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=60),
+                height=280, showlegend=False,
+            )
+            st.plotly_chart(fig_var, width="stretch")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -956,7 +1009,6 @@ with tab4:
                     </div>
                 </div>
             """, unsafe_allow_html=True)
-
         st.markdown("<br>", unsafe_allow_html=True)
 
         # ── ROW: Delay severity + Average delay side by side ──────
@@ -1054,3 +1106,110 @@ with tab4:
                     </div>
                 </div>
             """, unsafe_allow_html=True)
+
+
+# ════════════════════════════════════════════════════════════════════
+# TAB 5 — SNAPSHOT OVERVIEW
+# ════════════════════════════════════════════════════════════════════
+with tab5:
+    st.markdown('<p class="section-title">Snapshot Overview — Late Services</p>', unsafe_allow_html=True)
+    st.markdown('<p class="caption-text">Quick, actionable view of delays by day, station, and route. Default view shows averages across all days.</p>', unsafe_allow_html=True)
+
+    day_options, day_map = build_day_options(df["date"])
+    c1, c2, c3 = st.columns([1, 1, 1.4], gap="large")
+    with c1:
+        selected_day = st.selectbox("🗓️ Day", day_options, index=0, key="mgr_day")
+    if selected_day == "All days":
+        base_df = df.copy()
+    else:
+        base_df = df[df["date"] == day_map[selected_day]].copy()
+
+    station_options = sorted(base_df["stationfullname"].dropna().unique()) if not base_df.empty else []
+    with c2:
+        if station_options:
+            selected_station = st.selectbox("📍 Station", station_options, key="mgr_station")
+        else:
+            selected_station = st.selectbox("📍 Station", ["No stations available"], key="mgr_station")
+            selected_station = None
+
+    if selected_station:
+        base_df = base_df[base_df["stationfullname"] == selected_station].copy()
+
+    corridor_df = base_df[base_df["origin"].notna() & base_df["destination"].notna()].copy()
+    if not corridor_df.empty:
+        corridor_df["corridor"] = corridor_df["origin"] + " → " + corridor_df["destination"]
+        corridor_options = ["All routes"] + sorted(corridor_df["corridor"].unique())
+    else:
+        corridor_options = ["All routes"]
+
+    with c3:
+        selected_corridor = st.selectbox(
+            "➡️ Route (origin → destination)",
+            corridor_options,
+            key="mgr_route",
+        )
+
+    if selected_corridor != "All routes":
+        base_df = base_df[base_df["origin"] + " → " + base_df["destination"] == selected_corridor]
+
+    if base_df.empty:
+        st.warning("No data available for the selected filters yet.")
+    else:
+        late_df = base_df[base_df["late"] > 0].copy()
+        if late_df.empty:
+            st.info("No late services found for the selected filters.")
+        else:
+            summary = late_df.groupby(
+                ["traincode", "origin", "destination", "stationfullname"]
+            ).agg(
+                avg_late=("late", "mean"),
+                max_late=("late", "max"),
+                late_count=("late", "count"),
+                late_days=("date", "nunique"),
+                last_seen=("timestamp", "max"),
+            ).reset_index()
+
+            summary["avg_late"] = summary["avg_late"].round(1)
+            summary["max_late"] = summary["max_late"].round(0).astype(int)
+            summary["late_count"] = summary["late_count"].astype(int)
+            summary["late_days"] = summary["late_days"].astype(int)
+            summary["last_seen"] = summary["last_seen"].dt.strftime("%H:%M")
+            summary = summary.sort_values(["avg_late", "late_count"], ascending=[False, False])
+
+            if selected_day == "All days":
+                st.markdown('<p class="caption-text">Average lateness across all days and how often each service was late.</p>', unsafe_allow_html=True)
+                display_df = summary[[
+                    "traincode",
+                    "origin",
+                    "destination",
+                    "stationfullname",
+                    "avg_late",
+                    "late_days",
+                ]]
+            else:
+                st.markdown('<p class="caption-text">Late services for the selected day with peak delay and last observed time.</p>', unsafe_allow_html=True)
+                display_df = summary[[
+                    "traincode",
+                    "origin",
+                    "destination",
+                    "stationfullname",
+                    "avg_late",
+                    "max_late",
+                    "late_count",
+                    "last_seen",
+                ]]
+
+            display_df = display_df.rename(columns={
+                "traincode": "Train",
+                "origin": "Origin",
+                "destination": "Destination",
+                "stationfullname": "Station",
+                "avg_late": "Avg late (min)",
+                "max_late": "Max late (min)",
+                "late_count": "Late count",
+                "late_days": "Late days",
+                "last_seen": "Last seen",
+            })
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        
