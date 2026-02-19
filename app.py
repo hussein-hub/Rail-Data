@@ -63,7 +63,7 @@ st.markdown("<p style='color:#6b7294;font-size:0.85rem;margin-top:-10px;'>Live t
 # ─────────────────────────────────────────────
 # API HELPERS
 # ─────────────────────────────────────────────
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=5)  # Reduced from 15 to 5 seconds for quicker updates
 def get_running_trains():
     try:
         r = requests.get(f"{BASE}/getCurrentTrainsXML", timeout=10)
@@ -124,6 +124,51 @@ def delay_color(mins):
     if mins == 0:     return "#22c55e"
     if mins <= 5:     return "#f59e0b"
     return "#ef4444"
+
+def extract_traincode_from_message(msg):
+    """Extract the correct train code from the public message."""
+    if not msg or not isinstance(msg, str):
+        return None
+    # Try to extract from patterns like "D408" or "P213" at the start or after specific markers
+    # Pattern: word boundary + 1-2 letters + 1-4 digits
+    m = re.search(r'\b([A-Z]{1,2}\d{2,4})\b', str(msg))
+    if m:
+        return m.group(1)
+    return None
+
+def validate_train_coordinates(df):
+    """
+    Remove trains with suspicious coordinates:
+    - 0.0 / 0.0 (not started yet)
+    - Identical coordinates to other trains (corruption)
+    - Invalid latitude/longitude ranges for Ireland
+    """
+    if df.empty:
+        return df
+    
+    df = df.copy()
+    
+    # Remove trains at 0,0
+    df = df[(df["trainlatitude"] != 0.0) | (df["trainlongitude"] != 0.0)]
+    
+    # Ireland bounds (rough): 51.4 to 55.4 latitude, -5.3 to -10.6 longitude
+    df = df[(df["trainlatitude"].between(51.0, 56.0)) & (df["trainlongitude"].between(-11.0, -5.0))]
+    
+    # Remove trains with identical coordinates to others (likely corrupted duplicates)
+    # Group by coordinates and keep only the first train at each location
+    coord_groups = df.groupby(["trainlatitude", "trainlongitude"]).size()
+    duplicate_coords = coord_groups[coord_groups > 1].index
+    
+    for coords in duplicate_coords:
+        lat, lon = coords
+        matches = df[(df["trainlatitude"] == lat) & (df["trainlongitude"] == lon)]
+        if len(matches) > 1:
+            # Keep only the first one, remove others as likely corrupted duplicates
+            keep_idx = matches.index[0]
+            remove_indices = matches.index[1:]
+            df = df.drop(remove_indices)
+    
+    return df
 
 def time_str_to_minutes(t):
     """Convert HH:MM or HH:MM:SS string to minutes since midnight, or None."""
@@ -424,6 +469,30 @@ with tab2:
         ].copy()
         not_started = trains_df[trains_df["trainstatus"] == "N"].copy()
 
+        # ──── ADVANCED DATA VALIDATION ────────────────────────────────────
+        # 1. Remove coordinate duplicates (corruption indicator)
+        running = validate_train_coordinates(running)
+        
+        # 2. Fix corrupted train codes from API ────────────────────────────
+        # The API sometimes returns incorrect traincode values, but publicmessage has the truth
+        running["extracted_traincode"] = running["publicmessage"].apply(extract_traincode_from_message)
+        # Use extracted code if available and different, otherwise keep API traincode
+        running["traincode_clean"] = running.apply(
+            lambda row: row["extracted_traincode"] if row["extracted_traincode"] else row["traincode"],
+            axis=1
+        )
+        # Remove trains with None/invalid train codes
+        running = running[running["traincode_clean"].notna()].copy()
+        
+        # 3. Remove duplicates keeping the first occurrence of each train code
+        running = running.drop_duplicates(subset="traincode_clean", keep="first").copy()
+        
+        # 4. Final validation: ensure traincode matches the expected pattern
+        running = running[running["traincode_clean"].str.match(r'^[A-Z]{1,2}\d{2,4}$', na=False)].copy()
+        
+        # Update the traincode column with cleaned version
+        running["traincode"] = running["traincode_clean"]
+
         running["delay_mins"] = running["publicmessage"].apply(parse_delay_from_message)
         running["dot_color"]  = running["delay_mins"].apply(delay_color)
         running["delay_label"] = running["delay_mins"].apply(
@@ -471,6 +540,18 @@ with tab2:
 
         # ── Layer 2: Not-yet-started trains ───────────────────
         if not not_started.empty:
+            not_started = not_started.copy()
+            # Apply coordinate validation
+            not_started = validate_train_coordinates(not_started)
+            
+            # Apply same train code validation to not_started trains
+            not_started["extracted_traincode"] = not_started["publicmessage"].apply(extract_traincode_from_message) if "publicmessage" in not_started.columns else None
+            not_started["traincode_clean"] = not_started.apply(
+                lambda row: row.get("extracted_traincode") if pd.notna(row.get("extracted_traincode")) else row.get("traincode"),
+                axis=1
+            )
+            not_started["traincode"] = not_started["traincode_clean"]
+            
             not_started_valid = not_started.dropna(subset=["trainlatitude","trainlongitude"])
             not_started_valid = not_started_valid[not_started_valid["trainlatitude"] != 0]
             if not not_started_valid.empty:
@@ -594,6 +675,17 @@ with tab3:
         st.error("Could not reach the Rail API.")
     else:
         live_trains.columns = live_trains.columns.str.strip().str.lower()
+
+        # ──── DATA VALIDATION: Fix corrupted train codes from API (same as Tab 2) ────
+        live_trains = live_trains.copy()
+        live_trains["extracted_traincode"] = live_trains["publicmessage"].apply(extract_traincode_from_message) if "publicmessage" in live_trains.columns else None
+        live_trains["traincode_clean"] = live_trains.apply(
+            lambda row: row.get("extracted_traincode") if pd.notna(row.get("extracted_traincode")) else row.get("traincode"),
+            axis=1
+        )
+        # Validate traincode format
+        live_trains = live_trains[live_trains["traincode_clean"].str.match(r'^[A-Z]{1,2}\d{2,4}$', na=False)].copy()
+        live_trains["traincode"] = live_trains["traincode_clean"]
 
         # Build dropdown options — only R (running) trains with a usable public message
         running_opts = live_trains[live_trains["trainstatus"] == "R"].copy()
@@ -940,6 +1032,17 @@ with tab4:
                 continue
             df_fleet = df_fleet.copy()
             df_fleet.columns = df_fleet.columns.str.strip().str.lower()
+            
+            # Apply train code validation
+            df_fleet["extracted_traincode"] = df_fleet["publicmessage"].apply(extract_traincode_from_message) if "publicmessage" in df_fleet.columns else None
+            df_fleet["traincode_clean"] = df_fleet.apply(
+                lambda row: row.get("extracted_traincode") if pd.notna(row.get("extracted_traincode")) else row.get("traincode"),
+                axis=1
+            )
+            # Validate traincode format
+            df_fleet = df_fleet[df_fleet["traincode_clean"].str.match(r'^[A-Z]{1,2}\d{2,4}$', na=False)].copy()
+            df_fleet["traincode"] = df_fleet["traincode_clean"]
+            
             running = df_fleet[df_fleet.get("trainstatus", pd.Series(dtype=str)) == "R"].copy() \
                 if "trainstatus" in df_fleet.columns else df_fleet.copy()
             running["delay_mins"] = running["publicmessage"].apply(parse_delay_from_message) \
@@ -1174,7 +1277,25 @@ with tab5:
             summary["late_count"] = summary["late_count"].astype(int)
             summary["late_days"] = summary["late_days"].astype(int)
             summary["last_seen"] = summary["last_seen"].dt.strftime("%H:%M")
-            summary = summary.sort_values(["avg_late", "late_count"], ascending=[False, False])
+            
+            # Calculate impact metrics
+            summary["total_delay_impact"] = summary["avg_late"] * summary["late_days"]
+            summary["consistency"] = summary["avg_late"] * (summary["late_days"] / summary["late_days"].max())
+            
+            # Sort differently based on view context
+            if selected_day == "All days":
+                # For all days: prioritize trains with highest cumulative delay impact
+                # (avg delay × days late = total operational impact)
+                summary = summary.sort_values(
+                    ["total_delay_impact", "avg_late", "late_days"], 
+                    ascending=[False, False, False]
+                )
+            else:
+                # For selected day: prioritize by consistency and max delay
+                summary = summary.sort_values(
+                    ["avg_late", "consistency", "max_late"], 
+                    ascending=[False, False, False]
+                )
 
             if selected_day == "All days":
                 st.markdown('<p class="caption-text">Average lateness across all days and how often each service was late.</p>', unsafe_allow_html=True)
@@ -1195,7 +1316,6 @@ with tab5:
                     "stationfullname",
                     "avg_late",
                     "max_late",
-                    "late_count",
                     "last_seen",
                 ]]
 
@@ -1206,7 +1326,6 @@ with tab5:
                 "stationfullname": "Station",
                 "avg_late": "Avg late (min)",
                 "max_late": "Max late (min)",
-                "late_count": "Late count",
                 "late_days": "Late days",
                 "last_seen": "Last seen",
             })
