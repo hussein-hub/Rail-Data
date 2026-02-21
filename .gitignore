@@ -2,3 +2,7 @@ venv/
 .DS_Store
 .env
 *.md
+migrate_to_duckdb.py
+backfill_movements.py
+*.pem
+__pycache__/

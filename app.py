@@ -231,7 +231,7 @@ def build_sri_view(data):
 # ─────────────────────────────────────────────
 # LOAD HISTORICAL DB DATA
 # ─────────────────────────────────────────────
-df = pd.read_sql("train_logs", DB)
+df = pd.read_sql("SELECT * FROM train_logs", DB)
 df.columns = df.columns.str.strip().str.lower()
 if df.empty:
     st.warning("Waiting for data collection...")
@@ -245,6 +245,18 @@ df["date"]      = df["timestamp"].dt.date
 # SRI calculation
 merged = build_sri_view(df)
 
+# Load train_movements data for Tab 4
+try:
+    movements_df = pd.read_sql("SELECT * FROM train_movements", DB)
+    movements_df.columns = movements_df.columns.str.strip().str.lower()
+    if not movements_df.empty:
+        movements_df["fetched_at"] = pd.to_datetime(movements_df["fetched_at"])
+        movements_df["date"] = movements_df["fetched_at"].dt.date
+        # Parse traindate string to date for filtering
+        movements_df["traindate_parsed"] = pd.to_datetime(movements_df["traindate"], format="%d %b %Y", errors="coerce").dt.date
+except Exception:
+    movements_df = pd.DataFrame()  # Fallback to empty if table doesn't exist yet
+
 # ─────────────────────────────────────────────
 # SHARED LIVE DATA  (fetched once, used by Tab 2 and Tab 3)
 # Both tabs must see the exact same snapshot so a train visible on
@@ -255,11 +267,10 @@ _shared_trains_df = get_running_trains()
 # ─────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "📊  Station Analysis",
     "🗺️  Live Network Map",
     "🔍  Journey Profiler",
-    "🚄  Fleet Scorecard",
     "📌  Snapshot Overview",
 ])
 
@@ -399,43 +410,26 @@ with tab1:
                 st.plotly_chart(fig_hm, width="stretch")
 
             with col2_r:
-                st.markdown('<p class="section-title">Station Congestion Risk</p>', unsafe_allow_html=True)
-                st.markdown('<p class="caption-text">Total SRI load per station — higher means more at-risk services arriving.</p>', unsafe_allow_html=True)
-                station_risk = filtered_merged.groupby("stationfullname")["sri"].sum().sort_values(ascending=True).reset_index()
-                fig_cong = go.Figure(go.Bar(
-                    x=station_risk["sri"], y=station_risk["stationfullname"], orientation="h",
-                    marker=dict(color=station_risk["sri"],
+                st.markdown('<p class="section-title">Most Severely Delayed Train Services</p>', unsafe_allow_html=True)
+                st.markdown('<p class="caption-text">Services with highest average delays. These trains consistently accumulate the most lost time across all stops.</p>', unsafe_allow_html=True)
+                train_delays = filtered_df.groupby("traincode")["late"].mean().dropna().sort_values(ascending=False).head(12).reset_index()
+                train_delays.columns = ["traincode","avg_delay"]
+                fig_var = go.Figure(go.Bar(
+                    x=train_delays["traincode"], y=train_delays["avg_delay"],
+                    marker=dict(color=train_delays["avg_delay"],
                         colorscale=[[0,"#22c55e"],[0.5,"#f59e0b"],[1,"#ef4444"]], line=dict(width=0)),
-                    hovertemplate="%{y}<br>Total SRI: %{x:.1f}<extra></extra>",
+                    hovertemplate="Train: %{x}<br>Avg delay: %{y:.1f} min<extra></extra>",
                 ))
-                fig_cong.update_layout(
-                    xaxis=dict(title="Total SRI", gridcolor="#2e3350"),
-                    yaxis=dict(title="", tickfont=dict(size=10)),
+                fig_var.update_layout(
+                    xaxis=dict(title="Train Code", tickangle=-30),
+                    yaxis=dict(title="Avg Delay (min)", gridcolor="#2e3350"),
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=30),
-                    height=max(280, len(station_risk)*22+60), showlegend=False,
+                    font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=60),
+                    height=280, showlegend=False,
                 )
-                st.plotly_chart(fig_cong, width="stretch")
+                st.plotly_chart(fig_var, width="stretch")
 
-            # Row 3
-            st.markdown('<p class="section-title">Most Unpredictable Train Services</p>', unsafe_allow_html=True)
-            st.markdown('<p class="caption-text">Services with highest delay variability. High std. deviation = hard to plan around even if average SRI looks moderate.</p>', unsafe_allow_html=True)
-            train_var = filtered_df.groupby("traincode")["late"].std().dropna().sort_values(ascending=False).head(12).reset_index()
-            train_var.columns = ["traincode","std_delay"]
-            fig_var = go.Figure(go.Bar(
-                x=train_var["traincode"], y=train_var["std_delay"],
-                marker=dict(color=train_var["std_delay"],
-                    colorscale=[[0,"#6366f1"],[1,"#ef4444"]], line=dict(width=0)),
-                hovertemplate="Train: %{x}<br>Std deviation: %{y:.1f} min<extra></extra>",
-            ))
-            fig_var.update_layout(
-                xaxis=dict(title="Train Code", tickangle=-30),
-                yaxis=dict(title="Delay Std. Deviation (min)", gridcolor="#2e3350"),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c9cfe8", size=12), margin=dict(l=10,r=10,t=10,b=60),
-                height=280, showlegend=False,
-            )
-            st.plotly_chart(fig_var, width="stretch")
+            
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -443,7 +437,7 @@ with tab1:
 # ════════════════════════════════════════════════════════════════════
 with tab2:
     st.markdown('<p class="section-title">Live Train & Station Network</p>', unsafe_allow_html=True)
-    st.markdown('<p class="caption-text">All running trains plotted in real time. Colour = how late the train is. Size of station dot = congestion risk (SRI). Refreshes every 15 seconds.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="caption-text">All running trains plotted in real time. Colour = how late the train is. Size of station dot = average SRI per service (historical). Refreshes every 15 seconds.</p>', unsafe_allow_html=True)
 
     with st.spinner("Fetching live data…"):
         trains_df   = _shared_trains_df
@@ -499,15 +493,15 @@ with tab2:
             lambda x: "On time" if x == 0 else f"{x} min late" if x is not None else "Unknown"
         )
 
-        # Station SRI sizes
-        station_sri = merged.groupby("stationfullname")["sri"].sum().reset_index()
+        # Station SRI sizes — use average SRI per service (mean) instead of sum
+        station_sri = merged.groupby("stationfullname")["sri"].mean().reset_index()
         station_sri.columns = ["stationdesc", "total_sri"]
 
         # Normalise station name for merge (best-effort)
         stations_merged = stations_df.merge(station_sri, on="stationdesc", how="left")
         stations_merged["total_sri"] = (
             pd.to_numeric(stations_merged["total_sri"], errors="coerce")
-            .fillna(1)
+            .fillna(0)
             .clip(lower=0)
         )
         _max_sri = stations_merged["total_sri"].max()
@@ -531,9 +525,9 @@ with tab2:
             ),
             text=stations_merged["stationdesc"],
             customdata=stations_merged["total_sri"].round(1),
-            hovertemplate=(
+                hovertemplate=(
                 "<b>%{text}</b><br>"
-                "Congestion SRI: %{customdata}<extra></extra>"
+                "Avg SRI: %{customdata}<extra></extra>"
             ),
             name="Stations",
         ))
@@ -812,10 +806,6 @@ with tab3:
                             row_heights=[0.55, 0.45],
                             shared_xaxes=True,
                             vertical_spacing=0.1,
-                            subplot_titles=[
-                                "Stop-by-Stop Timeline  (dotted = scheduled · solid = actual · marker colour = delay severity)",
-                                "Delay at Each Stop (minutes late vs schedule)",
-                            ],
                         )
 
                         stops_all     = plot_df["stop"].tolist()
@@ -971,261 +961,39 @@ with tab3:
 
 
 # ════════════════════════════════════════════════════════════════════
-# TAB 4 — FLEET PERFORMANCE SCORECARD
+# TAB 4 — SNAPSHOT OVERVIEW
 # ════════════════════════════════════════════════════════════════════
 with tab4:
-    st.markdown('<p class="section-title">Fleet Performance Scorecard</p>', unsafe_allow_html=True)
-    st.markdown('<p class="caption-text">Historical comparison of DART, Mainline and Suburban services — aggregated from collected snapshots every minute, giving stable and meaningful rates rather than a fluctuating live count.</p>', unsafe_allow_html=True)
-
-    FLEET_TYPES  = {"DART": "D", "Mainline": "M", "Suburban": "S"}
-    FLEET_COLORS = {"DART": "#6366f1", "Mainline": "#f59e0b", "Suburban": "#22c55e"}
-
-    # ── Load historical fleet data from DB ────────────────────────
-    try:
-        fl = pd.read_sql("fleet_logs", DB)
-        fl.columns = fl.columns.str.strip().str.lower()
-        fl["timestamp"] = pd.to_datetime(fl["timestamp"])
-        has_fleet_history = not fl.empty
-    except Exception:
-        fl = pd.DataFrame()
-        has_fleet_history = False
-
-    # ── Build stats: aggregate over all stored snapshots ─────────
-    fleet_stats = []
-
-    if has_fleet_history:
-        for name in FLEET_TYPES:
-            subset = fl[fl["fleet"] == name]
-            if subset.empty:
-                continue
-            # Total observations = sum of "known" (trains with parseable delay) across all snapshots
-            total_obs        = subset["known"].sum()
-            total_on_time    = subset["on_time"].sum()
-            total_slightly   = subset["slightly_late"].sum()
-            total_sig        = subset["significantly"].sum()
-            avg_delay        = round(float(subset["avg_delay"].mean()), 1)
-            punctuality      = round(total_on_time / total_obs * 100, 1) if total_obs > 0 else 0.0
-            snapshots        = len(subset)
-            avg_running      = round(float(subset["total"].mean()), 1)
-            avg_sig          = round(float(subset["significantly"].mean()), 1)  # avg per snapshot
-
-            fleet_stats.append({
-                "fleet":          name,
-                "total":          avg_running,           # avg trains running per snapshot
-                "snapshots":      snapshots,
-                "on_time":        int(total_on_time),
-                "slightly_late":  int(total_slightly),
-                "significantly":  int(total_sig),
-                "avg_sig":        avg_sig,               # avg >5 min late per snapshot
-                "avg_delay":      avg_delay,
-                "punctuality":    punctuality,
-                "color":          FLEET_COLORS[name],
-            })
-
-    # ── Fallback: use a single live snapshot if no history yet ────
-    if not fleet_stats:
-        with st.spinner("No historical data yet — fetching live snapshot as fallback…"):
-            raw_fleets = {name: get_trains_by_type(code) for name, code in FLEET_TYPES.items()}
-
-        for name, df_fleet in raw_fleets.items():
-            if df_fleet.empty:
-                continue
-            df_fleet = df_fleet.copy()
-            df_fleet.columns = df_fleet.columns.str.strip().str.lower()
-            
-            # Apply train code validation
-            df_fleet["extracted_traincode"] = df_fleet["publicmessage"].apply(extract_traincode_from_message) if "publicmessage" in df_fleet.columns else None
-            df_fleet["traincode_clean"] = df_fleet.apply(
-                lambda row: row.get("extracted_traincode") if pd.notna(row.get("extracted_traincode")) else row.get("traincode"),
-                axis=1
-            )
-            # Validate traincode format
-            df_fleet = df_fleet[df_fleet["traincode_clean"].str.match(r'^[A-Z]{1,2}\d{2,4}$', na=False)].copy()
-            df_fleet["traincode"] = df_fleet["traincode_clean"]
-            
-            running = df_fleet[df_fleet.get("trainstatus", pd.Series(dtype=str)) == "R"].copy() \
-                if "trainstatus" in df_fleet.columns else df_fleet.copy()
-            running["delay_mins"] = running["publicmessage"].apply(parse_delay_from_message) \
-                if "publicmessage" in running.columns else None
-
-            total        = len(running)
-            known        = running["delay_mins"].notna().sum()
-            on_time      = (running["delay_mins"] == 0).sum()
-            slightly     = ((running["delay_mins"] > 0) & (running["delay_mins"] <= 5)).sum()
-            significantly = (running["delay_mins"] > 5).sum()
-            avg_delay    = running["delay_mins"].mean() if known > 0 else 0
-            punctuality  = on_time / known * 100 if known > 0 else 0
-
-            fleet_stats.append({
-                "fleet":          name,
-                "total":          total,
-                "snapshots":      1,
-                "on_time":        int(on_time),
-                "slightly_late":  int(slightly),
-                "significantly":  int(significantly),
-                "avg_sig":        float(significantly),   # same as significantly for single snapshot
-                "avg_delay":      round(float(avg_delay), 1),
-                "punctuality":    round(float(punctuality), 1),
-                "color":          FLEET_COLORS[name],
-            })
-        if fleet_stats:
-            st.info("Showing a single live snapshot — restart the collector to begin building history. Values will stabilise over time.", icon="ℹ️")
-
-    if not fleet_stats:
-        st.error("Could not fetch fleet data from the Rail API.")
-    else:
-        stats_df = pd.DataFrame(fleet_stats)
-
-        # ── ROW: KPI cards per fleet ──────────────────────────────
-        st.markdown("<br>", unsafe_allow_html=True)
-        cols = st.columns(len(fleet_stats), gap="large")
-
-        for col, row in zip(cols, fleet_stats):
-            pct_color = "#22c55e" if row["punctuality"] >= 80 else \
-                        "#f59e0b" if row["punctuality"] >= 60 else "#ef4444"
-            snapshots_label = f"{row['snapshots']} snapshots" if row["snapshots"] > 1 else "live snapshot"
-            col.markdown(f"""
-                <div style='background:#1e2130;border:1px solid {row["color"]}55;border-radius:14px;
-                            padding:20px 18px;text-align:center;'>
-                    <div style='color:{row["color"]};font-size:0.72rem;text-transform:uppercase;
-                                letter-spacing:.1em;font-weight:600;margin-bottom:8px;'>
-                        {row["fleet"]}
-                    </div>
-                    <div style='color:{pct_color};font-size:2.6rem;font-weight:800;line-height:1;'>
-                        {row["punctuality"]:.0f}%
-                    </div>
-                    <div style='color:#8d93b0;font-size:0.75rem;margin-top:4px;'>on-time rate ({snapshots_label})</div>
-                    <hr style='border-color:#2e3350;margin:12px 0;'>
-                    <div style='display:flex;justify-content:space-between;'>
-                        <div>
-                            <div style='color:#c9cfe8;font-size:1rem;font-weight:600;'>{row["total"]}</div>
-                            <div style='color:#6b7294;font-size:0.7rem;'>avg running</div>
-                        </div>
-                        <div>
-                            <div style='color:#f59e0b;font-size:1rem;font-weight:600;'>{row["avg_delay"]}</div>
-                            <div style='color:#6b7294;font-size:0.7rem;'>avg delay (min)</div>
-                        </div>
-                        <div>
-                            <div style='color:#ef4444;font-size:1rem;font-weight:600;'>{row["avg_sig"]}</div>
-                            <div style='color:#6b7294;font-size:0.7rem;'>avg &gt;5 min late</div>
-                        </div>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # ── ROW: Delay severity + Average delay side by side ──────
-        chart2_l, chart2_r = st.columns([1, 1], gap="large")
-
-        with chart2_l:
-            st.markdown('<p class="section-title">Average Delay by Fleet Type</p>', unsafe_allow_html=True)
-            st.markdown('<p class="caption-text">Mean minutes late across all collected snapshots (average of per-snapshot averages).</p>', unsafe_allow_html=True)
-
-            fig_avg = go.Figure(go.Bar(
-                x=stats_df["fleet"],
-                y=stats_df["avg_delay"],
-                marker=dict(
-                    color=stats_df["avg_delay"],
-                    colorscale=[[0, "#22c55e"], [0.5, "#f59e0b"], [1, "#ef4444"]],
-                    line=dict(width=0),
-                ),
-                text=stats_df["avg_delay"].apply(lambda x: f"{x} min"),
-                textposition="outside",
-                hovertemplate="<b>%{x}</b><br>Avg delay: %{y:.1f} min<extra></extra>",
-            ))
-            fig_avg.update_layout(
-                xaxis=dict(title="Fleet Type"),
-                yaxis=dict(title="Avg Delay (min)", gridcolor="#2e3350"),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c9cfe8", size=12),
-                margin=dict(l=10, r=10, t=10, b=10),
-                height=280,
-                showlegend=False,
-            )
-            st.plotly_chart(fig_avg, width="stretch")
-
-        with chart2_r:
-            st.markdown('<p class="section-title">Delay Severity Breakdown</p>', unsafe_allow_html=True)
-            st.markdown('<p class="caption-text">Average number of trains per snapshot in each delay category — normalised by snapshot count so all fleets are comparable regardless of how long the collector has been running.</p>', unsafe_allow_html=True)
-
-            stack_df = stats_df.copy()
-            stack_df["avg_on_time"]  = stack_df["on_time"]       / stack_df["snapshots"]
-            stack_df["avg_slightly"] = stack_df["slightly_late"]  / stack_df["snapshots"]
-
-            fig_stack = go.Figure()
-            for label, key, color in [
-                ("On time",      "avg_on_time",  "#22c55e"),
-                ("1–5 min late", "avg_slightly", "#f59e0b"),
-                (">5 min late",  "avg_sig",       "#ef4444"),
-            ]:
-                fig_stack.add_trace(go.Bar(
-                    name=label,
-                    x=stack_df["fleet"],
-                    y=stack_df[key].round(1),
-                    marker=dict(color=color, line=dict(width=0)),
-                    hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:.1f}} avg per snapshot<extra></extra>",
-                ))
-            fig_stack.update_layout(
-                barmode="stack",
-                xaxis=dict(title="Fleet Type"),
-                yaxis=dict(title="Avg trains per snapshot", gridcolor="#2e3350"),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c9cfe8", size=12),
-                legend=dict(
-                    bgcolor="#1e2130", bordercolor="#2e3350", borderwidth=1,
-                    orientation="h", x=0, y=1.12,
-                    font=dict(color="#c9cfe8", size=11),
-                ),
-                margin=dict(l=10, r=10, t=30, b=10),
-                height=280,
-            )
-            st.plotly_chart(fig_stack, width="stretch")
-
-        # ── Insight banner ────────────────────────────────────────
-        st.markdown("<br>", unsafe_allow_html=True)
-        if len(fleet_stats) >= 2:
-            worst  = min(fleet_stats, key=lambda x: x["punctuality"])
-            best   = max(fleet_stats, key=lambda x: x["punctuality"])
-            w_col  = "#ef4444" if worst["punctuality"] < 60 else "#f59e0b"
-            b_col  = "#22c55e"
-            gap    = best["punctuality"] - worst["punctuality"]
-
-            st.markdown(f"""
-                <div style='background:#1e2130;border:1px solid #2e3350;border-radius:12px;
-                            padding:16px 22px;display:flex;gap:32px;align-items:center;'>
-                    <div style='color:#8d93b0;font-size:0.75rem;text-transform:uppercase;
-                                letter-spacing:.08em;white-space:nowrap;'>Key Insight</div>
-                    <div style='color:#c9cfe8;font-size:0.9rem;line-height:1.6;'>
-                        <span style='color:{w_col};font-weight:700;'>{worst["fleet"]}</span>
-                        is the worst-performing fleet historically with a
-                        <span style='color:{w_col};font-weight:700;'>{worst["punctuality"]:.0f}% on-time rate</span>
-                        and an average delay of <span style='color:{w_col};font-weight:700;'>{worst["avg_delay"]} min</span> —
-                        <span style='color:{b_col};font-weight:700;'>{gap:.0f} percentage points</span>
-                        behind {best["fleet"]} ({best["punctuality"]:.0f}% on time).
-                        Targeted investment in {worst["fleet"]} infrastructure or scheduling would yield the
-                        highest network-wide punctuality improvement.
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
-
-
-# ════════════════════════════════════════════════════════════════════
-# TAB 5 — SNAPSHOT OVERVIEW
-# ════════════════════════════════════════════════════════════════════
-with tab5:
     st.markdown('<p class="section-title">Snapshot Overview — Late Services</p>', unsafe_allow_html=True)
-    st.markdown('<p class="caption-text">Quick, actionable view of delays by day, station, and route. Default view shows averages across all days.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="caption-text">Quick, actionable view of delays by day, station, and route using detailed movement data. Default view shows averages across all days.</p>', unsafe_allow_html=True)
 
-    day_options, day_map = build_day_options(df["date"])
+    # Use movements_df if available, otherwise fall back to train_logs
+    if not movements_df.empty:
+        tab4_df = movements_df.copy()
+        # Use the pre-calculated delay columns from backfill script
+        tab4_df["late"] = tab4_df["delay_arr_mins"].fillna(0).clip(lower=0)
+        
+        # Map columns to expected format
+        tab4_df["stationfullname"] = tab4_df["locationfullname"]
+        tab4_df["origin"] = tab4_df["trainorigin"]
+        tab4_df["destination"] = tab4_df["traindestination"]
+        tab4_df["timestamp"] = tab4_df["fetched_at"]
+        
+        # Use traindate_parsed for date filtering
+        if "traindate_parsed" in tab4_df.columns:
+            tab4_df["date"] = tab4_df["traindate_parsed"]
+    else:
+        tab4_df = df.copy()
+        st.info("Using station logs data. Run backfill_movements.py to gather detailed movement data.")
+
+    day_options, day_map = build_day_options(tab4_df["date"])
     c1, c2, c3 = st.columns([1, 1, 1.4], gap="large")
     with c1:
         selected_day = st.selectbox("🗓️ Day", day_options, index=0, key="mgr_day")
     if selected_day == "All days":
-        base_df = df.copy()
+        base_df = tab4_df.copy()
     else:
-        base_df = df[df["date"] == day_map[selected_day]].copy()
+        base_df = tab4_df[tab4_df["date"] == day_map[selected_day]].copy()
 
     station_options = sorted(base_df["stationfullname"].dropna().unique()) if not base_df.empty else []
     with c2:

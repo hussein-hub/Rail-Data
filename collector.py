@@ -101,7 +101,7 @@ def job():
         data.to_sql("train_logs", DB, if_exists="append", index=False)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Station logs: {len(data)} rows")
 
-    # ── Fleet snapshot logs (new) ────────────────────────────────────
+    # ── Fleet snapshot logs ──────────────────────────────────────────
     fleet_rows = []
     for name, code in FLEET_TYPES.items():
         row = fetch_fleet(name, code)
@@ -113,6 +113,7 @@ def job():
         fleet_df.to_sql("fleet_logs", DB, if_exists="append", index=False)
         summary = ", ".join(f"{r['fleet']}={r['total']}" for r in fleet_rows)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Fleet logs: {len(fleet_df)} rows ({summary})")
+
 
 
 schedule.every(1).minutes.do(job)
