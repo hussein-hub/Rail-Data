@@ -200,7 +200,7 @@ def build_day_options(date_series):
     day_options = ["All days"]
     day_map = {}
     if today in available_dates:
-        day_options.append("Today")
+        day_options.insert(0, "Today")
         day_map["Today"] = today
     if yesterday in available_dates:
         day_options.append("Yesterday")
@@ -350,11 +350,27 @@ with tab1:
                 st.plotly_chart(fig_sri, width="stretch")
 
             with col_r:
-                st.markdown('<p class="section-title">Delay Trend — Selected Day</p>', unsafe_allow_html=True)
-                st.markdown('<p class="caption-text">15-minute rolling average delay, filtered by the day selector above.</p>', unsafe_allow_html=True)
+                if selected_day == "All days":
+                    st.markdown('<p class="section-title">Delay Trend — Average by Time of Day</p>', unsafe_allow_html=True)
+                    st.markdown('<p class="caption-text">Average delay pattern across all days — showing typical delay by time of day.</p>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<p class="section-title">Delay Trend — Selected Day</p>', unsafe_allow_html=True)
+                    st.markdown('<p class="caption-text">15-minute rolling average delay for the selected day.</p>', unsafe_allow_html=True)
+                
                 df_station = filtered_df[filtered_df["stationfullname"] == station].copy()
-                ts = df_station.set_index("timestamp").resample("15min")["late"].mean().dropna().reset_index()
-                ts.columns = ["time", "avg_delay"]
+                
+                if selected_day == "All days":
+                    # For "All days", aggregate by time-of-day across all dates
+                    df_station["time_only"] = df_station["timestamp"].dt.floor("15min").dt.time
+                    ts = df_station.groupby("time_only")["late"].mean().reset_index()
+                    ts.columns = ["time", "avg_delay"]
+                    # Convert time to datetime for plotting
+                    ts["time"] = pd.to_datetime(ts["time"].astype(str), format="%H:%M:%S")
+                else:
+                    # For specific day, show chronological trend
+                    ts = df_station.set_index("timestamp").resample("15min")["late"].mean().dropna().reset_index()
+                    ts.columns = ["time", "avg_delay"]
+                
                 fig_ts = go.Figure(go.Scatter(
                     x=ts["time"], y=ts["avg_delay"], mode="lines",
                     fill="tozeroy", line=dict(color="#6366f1", width=2.5),
@@ -411,9 +427,39 @@ with tab1:
 
             with col2_r:
                 st.markdown('<p class="section-title">Most Severely Delayed Train Services</p>', unsafe_allow_html=True)
-                st.markdown('<p class="caption-text">Services with highest average delays. These trains consistently accumulate the most lost time across all stops.</p>', unsafe_allow_html=True)
-                train_delays = filtered_df.groupby("traincode")["late"].mean().dropna().sort_values(ascending=False).head(12).reset_index()
-                train_delays.columns = ["traincode","avg_delay"]
+                # Prefer movements data (actual arrival delay per stop) over station board snapshots
+                # so this chart matches Tab 4 exactly for the same station/day selection.
+                _use_movements = (
+                    not movements_df.empty
+                    and "locationfullname" in movements_df.columns
+                    and "delay_arr_mins" in movements_df.columns
+                )
+                _mov_train_delays = pd.DataFrame()
+                if _use_movements:
+                    _mov_station = movements_df[movements_df["locationfullname"] == station].copy()
+                    if selected_day != "All days":
+                        _mov_station = _mov_station[_mov_station["traindate_parsed"] == day_map[selected_day]]
+                    _mov_station["_late"] = pd.to_numeric(_mov_station["delay_arr_mins"], errors="coerce").fillna(0).clip(lower=0)
+                    _mov_train_delays = (
+                        _mov_station[_mov_station["_late"] > 0]
+                        .groupby("traincode")["_late"]
+                        .mean()
+                        .dropna()
+                        .sort_values(ascending=False)
+                        .head(12)
+                        .reset_index()
+                    )
+                    if not _mov_train_delays.empty:
+                        _mov_train_delays.columns = ["traincode", "avg_delay"]
+
+                if not _mov_train_delays.empty:
+                    train_delays = _mov_train_delays
+                    st.markdown('<p class="caption-text">Actual arrival delay at this station from movement records (matches Snapshot Overview tab).</p>', unsafe_allow_html=True)
+                else:
+                    # Fall back to train_logs when movements data is absent for the selected period
+                    train_delays = df_station[df_station["late"] > 0].groupby("traincode")["late"].mean().dropna().sort_values(ascending=False).head(12).reset_index()
+                    train_delays.columns = ["traincode", "avg_delay"]
+                    st.markdown('<p class="caption-text">Delay as reported on the station departure board (movement records not yet available for this period).</p>', unsafe_allow_html=True)
                 fig_var = go.Figure(go.Bar(
                     x=train_delays["traincode"], y=train_delays["avg_delay"],
                     marker=dict(color=train_delays["avg_delay"],
@@ -937,7 +983,7 @@ with tab3:
                             max_delay_stop = passed.loc[passed["delay"].idxmax(), "stop"] if passed["delay"].notna().any() else "—"
                             max_delay_val  = passed["delay"].max()
                             final_delay    = passed.iloc[-1]["delay"] if not passed.empty else None
-                            recovered      = (final_delay is not None and final_delay < max_delay_val and max_delay_val > 0)
+                            recovered      = (final_delay is not None and max_delay_val > 0 and final_delay <= 2)
 
                             s1, s2, s3 = st.columns(3)
                             def metric_card(col, label, value, sub=""):
@@ -1071,7 +1117,7 @@ with tab4:
                     "traincode",
                     "origin",
                     "destination",
-                    "stationfullname",
+                    # "stationfullname",
                     "avg_late",
                     "late_days",
                 ]]
@@ -1081,7 +1127,7 @@ with tab4:
                     "traincode",
                     "origin",
                     "destination",
-                    "stationfullname",
+                    # "stationfullname",
                     "avg_late",
                     "max_late",
                     "last_seen",
@@ -1091,7 +1137,7 @@ with tab4:
                 "traincode": "Train",
                 "origin": "Origin",
                 "destination": "Destination",
-                "stationfullname": "Station",
+                # "stationfullname": "Station",
                 "avg_late": "Avg late (min)",
                 "max_late": "Max late (min)",
                 "late_days": "Late days",
